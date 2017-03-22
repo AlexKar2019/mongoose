@@ -1,0 +1,16 @@
+SRC=$(wildcard *.c)
+OBJS=$(SRC:.c=.o)
+
+CFLAGS+=-I./
+MONGOOSE_OPTS=-DMG_DISABLE_MQTT -DMG_DISABLE_JSON_RPC -DMG_DISABLE_SOCKETPAIR  -DMG_DISABLE_CGI # -DMG_DISABLE_HTTP_WEBSOCKET
+
+all: $(OBJS)
+
+%.o: %.c 
+	$(CC) -c -o $@ $(CFLAGS) $(MONGOOSE_OPTS) $< 
+
+
+clean:
+	rm -f *.o 
+
+.PHONY: clean

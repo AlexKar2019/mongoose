@@ -4202,6 +4202,133 @@ time_t mg_socket_if_poll(struct mg_iface *iface, int timeout_ms) {
 
   return (time_t) now;
 }
+ /*************** BEGIN after-select action definition ********************/
+
+int mongoose_select_init(struct mg_iface * iface, add_fd2set addfd, void *fd_handler, int timeout_ms)
+{
+	struct mg_mgr *mgr;
+	double min_timer;
+	struct mg_connection *nc, *tmp;
+	int num_fds, num_timers = 0;
+#ifdef __unix__
+	int try_dup = 1;
+#endif
+	mgr = iface->mgr;
+
+#if MG_ENABLE_BROADCAST
+	addfd(fd_handler, mgr->ctl[1], 'r');
+#endif
+
+	/*
+	 * Note: it is ok to have connections with sock == INVALID_SOCKET in the list,
+	 * e.g. timer-only "connections".
+	 */
+	min_timer = 0;
+	for (nc = mgr->active_connections, num_fds = 0; nc != NULL; nc = tmp) {
+		tmp = nc->next;
+
+		if (nc->sock != INVALID_SOCKET) {
+			num_fds++;
+
+		#ifdef __unix__
+			/* A hack to make sure all our file descriptos fit into FD_SETSIZE. */
+			if (nc->sock >= (sock_t) FD_SETSIZE && try_dup) {
+				int new_sock = dup(nc->sock);
+				if (new_sock >= 0 && new_sock < (sock_t) FD_SETSIZE) {
+					closesocket(nc->sock);
+					//DBG(("new sock %d -> %d", nc->sock, new_sock));
+					nc->sock = new_sock;
+				} else {
+					try_dup = 0;
+				}
+			}
+		#endif
+
+			if (!(nc->flags & MG_F_WANT_WRITE) &&
+				nc->recv_mbuf.len < nc->recv_mbuf_limit &&
+				(!(nc->flags & MG_F_UDP) || nc->listener == NULL)) {
+				addfd(fd_handler, nc->sock, 'r');
+			}
+
+			if (((nc->flags & MG_F_CONNECTING) && !(nc->flags & MG_F_WANT_READ)) ||
+				(nc->send_mbuf.len > 0 && !(nc->flags & MG_F_CONNECTING))) {
+				addfd(fd_handler, nc->sock, 'w');
+				addfd(fd_handler, nc->sock, 'e');
+			}
+		}
+
+		if (nc->ev_timer_time > 0) {
+			if (num_timers == 0 || nc->ev_timer_time < min_timer) {
+				min_timer = nc->ev_timer_time;
+			}
+			num_timers++;
+		}
+	}
+
+	/*
+	 * If there is a timer to be fired earlier than the requested timeout,
+	 * adjust the timeout.
+	 */
+	if (num_timers > 0) {
+		double timer_timeout_ms = (min_timer - mg_time()) * 1000 + 1 /* rounding */;
+		if (timer_timeout_ms < timeout_ms) {
+			timeout_ms = (timer_timeout_ms > 0 ? timer_timeout_ms : 0);
+		}
+	}
+
+	return timeout_ms;
+}
+
+uint8_t mongoose_select_action(struct mg_iface * iface, int ret, fd_set * readfds, fd_set * writefds, fd_set * errfds)
+{
+	struct mg_mgr *mgr;
+	double now;
+	struct mg_connection *nc, *tmp;
+
+	mgr = iface->mgr;
+	now = mg_time();
+
+#if MG_ENABLE_BROADCAST
+	if (ret > 0 && mgr->ctl[1] != INVALID_SOCKET &&
+		FD_ISSET(mgr->ctl[1], readfds)) {
+		mg_mgr_handle_ctl_sock(mgr);
+	}
+#endif
+
+	for (nc = mgr->active_connections; nc != NULL; nc = tmp) {
+		int fd_flags = 0;
+		if (nc->sock != INVALID_SOCKET) {
+			if (ret > 0) {
+				fd_flags = (FD_ISSET(nc->sock, readfds) &&
+					(!(nc->flags & MG_F_UDP) || nc->listener == NULL)
+					? _MG_F_FD_CAN_READ
+					: 0) |
+					(FD_ISSET(nc->sock, writefds) ? _MG_F_FD_CAN_WRITE : 0) |
+					(FD_ISSET(nc->sock, writefds) ? _MG_F_FD_ERROR : 0);
+			}
+#if MG_LWIP
+			/* With LWIP socket emulation layer, we don't get write events for UDP */
+			if ((nc->flags & MG_F_UDP) && nc->listener == NULL) {
+				fd_flags |= _MG_F_FD_CAN_WRITE;
+			}
+#endif
+		}
+		tmp = nc->next;
+		mg_mgr_handle_conn(nc, fd_flags, now);
+	}
+
+	for (nc = mgr->active_connections; nc != NULL; nc = tmp) {
+		tmp = nc->next;
+		if ((nc->flags & MG_F_CLOSE_IMMEDIATELY) ||
+			(nc->send_mbuf.len == 0 && (nc->flags & MG_F_SEND_AND_CLOSE))) {
+			mg_close_conn(nc);
+		}
+	}
+	return 0;
+}
+
+
+ /*************** END periodic task definition ********************/
 
 #if MG_ENABLE_BROADCAST
 MG_INTERNAL void mg_socketpair_close(sock_t *sock) {

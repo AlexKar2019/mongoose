@@ -3056,7 +3056,7 @@ struct {								\
 /*
  * List declarations.
  */
-#define	LIST_HEAD(name, type)						\
+#define	MG_LIST_HEAD(name, type)						\
 struct name {								\
 	struct type *lh_first;	/* first element */			\
 }
@@ -4003,6 +4003,11 @@ void mg_mgr_free(struct mg_mgr *mgr);
  * event handlers and returns.
  */
 int mg_mgr_poll(struct mg_mgr *mgr, int milli);
+
+/* These functions perform the actions due by mg_mgr_poll before and after the actual select() call */
+typedef void (*add_fd2set)(void *, int, char);
+int mongoose_select_init(struct mg_iface * iface, add_fd2set addfd, void *fd_handler, int timeout_ms);
+uint8_t mongoose_select_action(struct mg_iface * iface, int ret, fd_set * readfds, fd_set * writefds, fd_set * errfds);
 
 #if MG_ENABLE_BROADCAST
 /*
@@ -5949,7 +5954,7 @@ struct mg_mqtt_session {
 
 /* MQTT broker. */
 struct mg_mqtt_broker {
-  LIST_HEAD(_mg_sesshead, mg_mqtt_session) sessions; /* Session list */
+  MG_LIST_HEAD(_mg_sesshead, mg_mqtt_session) sessions; /* Session list */
   void *user_data;                                   /* User data */
 };
 
